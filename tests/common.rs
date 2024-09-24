@@ -38,7 +38,7 @@ fn get_credentials() -> Result<Credentials> {
 pub async fn get_client() -> Result<Client> {
     let creds = get_credentials()?;
 
-    let mut client = Client::new(Some(creds.client_id), Some(creds.client_secret));
+    let mut client = Client::new_with_client_secret(Some(creds.client_id), Some(creds.client_secret));
     client
         .login_with_credential(creds.username, creds.password)
         .await?;

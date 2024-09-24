@@ -21,13 +21,14 @@ pub struct Client {
     login_endpoint: String,
     instance_url: Option<String>,
     access_token: Option<AccessToken>,
+    refresh_token: Option<String>,
     version: String,
 }
 
 impl Client {
     /// Creates a new client when passed a Client ID and Client Secret. These
     /// can be obtained by creating a connected app in Salesforce
-    pub fn new(client_id: Option<String>, client_secret: Option<String>) -> Self {
+    pub fn new_with_client_secret(client_id: Option<String>, client_secret: Option<String>) -> Self {
         let http_client = reqwest::Client::new();
         Client {
             http_client,
@@ -36,14 +37,34 @@ impl Client {
             login_endpoint: "https://login.salesforce.com".to_string(),
             access_token: None,
             instance_url: None,
+            refresh_token: None,
             version: "v44.0".to_string(),
         }
     }
 
+    pub fn new() -> Self {
+        let http_client = reqwest::Client::new();
+        Client {
+            http_client,
+            client_id: None,
+            client_secret: None,
+            login_endpoint: "https://login.salesforce.com".to_string(),
+            access_token: None,
+            instance_url: None,
+            refresh_token: None,
+            version: "v44.0".to_string(),
+        }
+    }
+
+
     /// Set the login endpoint. This is useful if you want to connect to a
     /// Sandbox
     pub fn set_login_endpoint(&mut self, endpoint: &str) -> &mut Self {
-        self.login_endpoint = endpoint.to_string();
+        if (endpoint.starts_with("https://")) {
+            self.login_endpoint = endpoint.to_string();
+        } else {
+            self.login_endpoint = format!("https://{}", endpoint);
+        };
         self
     }
 
@@ -55,6 +76,21 @@ impl Client {
 
     pub fn set_instance_url(&mut self, instance_url: &str) -> &mut Self {
         self.instance_url = Some(instance_url.to_string());
+        self
+    }
+
+    pub fn set_refresh_token(&mut self, refresh_token: &str) -> &mut Self {
+        self.refresh_token = Some(refresh_token.to_string());
+        self
+    }
+
+    pub fn set_client_id(&mut self, client_id: &str) -> &mut Self {
+        self.client_id = Some(client_id.to_string());
+        self
+    }
+
+    pub fn set_client_secret(&mut self, client_secret: &str) -> &mut Self {
+        self.client_secret = Some(client_secret.to_string());
         self
     }
 
@@ -97,6 +133,46 @@ impl Client {
         } else {
             let token_error = res.json().await?;
             Err(Error::TokenError(token_error))
+        }
+    }
+
+    pub async fn login_with_sfdx_auth_url(
+        &mut self,
+        sfdx_auth_url: String,
+    ) -> Result<&mut Self, Error> {
+        let re = Regex::new(r"force:\/\/([a-zA-Z0-9._-]+):([a-zA-Z0-9._-]*):([a-zA-Z0-9._-]+={0,2})@([a-zA-Z0-9._-]+)").unwrap();
+        let caps = re.captures(&sfdx_auth_url).unwrap();
+
+        self.set_client_id(&caps[1]);
+        self.set_client_secret(&caps[2]);
+        self.set_refresh_token(&caps[3]);
+        self.set_login_endpoint(&caps[4]);
+
+        let token_url = format!("{}/services/oauth2/token", self.login_endpoint);
+        let params = [
+            ("grant_type", "refresh_token"),
+            ("client_id", self.client_id.as_ref().unwrap()),
+            ("refresh_token", self.refresh_token.as_ref().unwrap()),
+        ];
+        let res = self
+            .http_client
+            .post(token_url.as_str())
+            .form(&params)
+            .send()
+            .await?;
+
+        if res.status().is_success() {
+            let r: TokenResponse = res.json().await?;
+            self.access_token = Some(AccessToken {
+                value: r.access_token,
+                issued_at: r.issued_at,
+                token_type: r.token_type.ok_or(Error::NotLoggedIn)?,
+            });
+            self.instance_url = Some(r.instance_url);
+            Ok(self)
+        } else {
+            let error_response = res.json().await?;
+            Err(Error::TokenError(error_response))
         }
     }
 
@@ -576,7 +652,7 @@ mod tests {
             )
             .create();
 
-        let mut client = super::Client::new(Some("aaa".to_string()), Some("bbb".to_string()));
+        let mut client = super::Client::new_with_client_secret(Some("aaa".to_string()), Some("bbb".to_string()));
         let url = &mockito::server_url();
         client.set_login_endpoint(url);
         client
@@ -786,7 +862,7 @@ mod tests {
     }
 
     fn create_test_client() -> super::Client {
-        let mut client = super::Client::new(Some("aaa".to_string()), Some("bbb".to_string()));
+        let mut client = super::Client::new_with_client_secret(Some("aaa".to_string()), Some("bbb".to_string()));
         let url = &mockito::server_url();
         client.set_instance_url(url);
         client.set_access_token("this_is_access_token");

@@ -6,7 +6,7 @@ async fn main() -> Result<(), Error> {
     let username = env::var("SFDC_USERNAME").unwrap();
     let password = env::var("SFDC_PASSWORD").unwrap();
 
-    let mut client = Client::new(None, None);
+    let mut client = Client::new_with_client_secret(None, None);
     client.login_by_soap(username, password).await?;
     Ok(())
 }
