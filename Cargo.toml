@@ -24,7 +24,7 @@ regex = "1.5"
 [dev-dependencies]
 
 cargo-license = "0.3.0"
-mockito = "0.27.0"
+mockito = {version = "1.5.0" }
 tokio = { version = "1.13", features = ["rt-multi-thread", "macros"] }
 env_logger = "0.7.1"
 anyhow = "1.0.32"

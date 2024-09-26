@@ -2,7 +2,7 @@ extern crate reqwest;
 
 use crate::errors::Error;
 use crate::response::{
-    AccessToken, CreateResponse, DescribeGlobalResponse, DescribeResponse, ErrorResponse,
+    AccessToken, CreateResponse, DescribeGlobalResponse, /*DescribeResponse,*/ ErrorResponse,
     QueryResponse, SearchResponse, TokenResponse, VersionResponse,
 };
 use crate::utils::substring_before;
@@ -60,7 +60,7 @@ impl Client {
     /// Set the login endpoint. This is useful if you want to connect to a
     /// Sandbox
     pub fn set_login_endpoint(&mut self, endpoint: &str) -> &mut Self {
-        if (endpoint.starts_with("https://")) {
+        if endpoint.starts_with("https://") || endpoint.starts_with("http://") {
             self.login_endpoint = endpoint.to_string();
         } else {
             self.login_endpoint = format!("https://{}", endpoint);
@@ -140,7 +140,7 @@ impl Client {
         &mut self,
         sfdx_auth_url: String,
     ) -> Result<&mut Self, Error> {
-        let re = Regex::new(r"force:\/\/([a-zA-Z0-9._-]+):([a-zA-Z0-9._-]*):([a-zA-Z0-9._-]+={0,2})@([a-zA-Z0-9._-]+)").unwrap();
+        let re = Regex::new(r"force://([a-zA-Z0-9._-]+):([a-zA-Z0-9._-]*):([a-zA-Z0-9._-]+={0,2})@([a-zA-Z0-9._-]+)").unwrap();
         let caps = re.captures(&sfdx_auth_url).unwrap();
 
         self.set_client_id(&caps[1]);
@@ -229,7 +229,7 @@ impl Client {
             "</se:Body>",
             "</se:Envelope>",
         ]
-        .join("");
+            .join("");
         let res = self
             .http_client
             .post(token_url.as_str())
@@ -605,7 +605,7 @@ impl Client {
                 "Bearer {}",
                 self.access_token.as_ref().ok_or(Error::NotLoggedIn)?.value
             )
-            .parse()?,
+                .parse()?,
         );
 
         Ok(headers)
@@ -622,10 +622,13 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    use mockito::ServerGuard;
     use crate::{errors::Error, response::QueryResponse};
-    use mockito::mock;
+    // use mockito::mock;
     use serde::{Deserialize, Serialize};
     use serde_json::json;
+    use tokio::runtime::Runtime;
+    use crate::client::Client;
 
     #[derive(Deserialize, Serialize)]
     #[serde(rename_all = "PascalCase")]
@@ -634,9 +637,10 @@ mod tests {
         name: String,
     }
 
-    #[tokio::test]
-    async fn login_with_credentials() -> Result<(), Error> {
-        let _m = mock("POST", "/services/oauth2/token")
+    #[test]
+    fn login_with_credentials() -> Result<(), Error> {
+        let mut server = mockito::Server::new();
+        let _m = server.mock("POST", "/services/oauth2/token")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -648,16 +652,18 @@ mod tests {
                     "signature": "abcde",
                     "token_type": "Bearer",
                 })
-                .to_string(),
+                    .to_string(),
             )
             .create();
+        let mut rt = Runtime::new().unwrap();
 
         let mut client = super::Client::new_with_client_secret(Some("aaa".to_string()), Some("bbb".to_string()));
-        let url = &mockito::server_url();
-        client.set_login_endpoint(url);
-        client
-            .login_with_credential("u".to_string(), "p".to_string())
-            .await?;
+        client.set_login_endpoint(&server.url());
+
+        let req_fut =
+            client.login_with_credential("u".to_string(), "p".to_string());
+        rt.block_on(req_fut).unwrap();
+
         let token = client.access_token.unwrap();
         assert_eq!("this_is_access_token", token.value);
         assert_eq!("Bearer", token.token_type);
@@ -667,16 +673,17 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn query() -> Result<(), Error> {
-        let _m = mock(
+    #[test]
+    fn query() -> Result<(), Error> {
+        let mut server = mockito::Server::new();
+        let _m = server.mock(
             "GET",
             "/services/data/v44.0/query/?q=SELECT+Id%2C+Name+FROM+Account",
         )
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
                 "totalSize": 123,
                 "done": true,
                 "records": vec![
@@ -686,12 +693,16 @@ mod tests {
                     },
                 ]
             })
-            .to_string(),
-        )
-        .create();
+                    .to_string(),
+            )
+            .create();
 
-        let client = create_test_client();
-        let r: QueryResponse<Account> = client.query("SELECT Id, Name FROM Account").await?;
+        let client = create_client(&mut server);
+
+        let mut rt = Runtime::new().unwrap();
+        let req_fut = client.query("SELECT Id, Name FROM Account");
+        let r: QueryResponse<Account> = rt.block_on(req_fut)?;
+
         assert_eq!(123, r.total_size);
         assert_eq!(true, r.done);
         assert_eq!("123", r.records[0].id);
@@ -699,10 +710,63 @@ mod tests {
 
         Ok(())
     }
+    #[test]
+    fn create() -> Result<(), Error> {
+        let mut server = mockito::Server::new();
+        let _m = server.mock("POST", "/services/data/v44.0/sobjects/Account")
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                                    "id": "12345",
+                                    "success": true,
+                    //                "errors": vec![],
+                                })
+                    .to_string(),
+            )
+            .create();
 
-    #[tokio::test]
-    async fn create() -> Result<(), Error> {
-        let _m = mock("POST", "/services/data/v44.0/sobjects/Account")
+        let client = create_client(&mut server);
+
+        let mut rt = Runtime::new().unwrap();
+        let req_fut = client
+            .create("Account", [("Name", "foo"), ("Abc__c", "123")]);
+        let r = rt.block_on(req_fut)?;
+
+        assert_eq!("12345", r.id);
+        assert_eq!(true, r.success);
+
+        Ok(())
+    }
+
+
+    #[test]
+    fn update() -> Result<(), Error> {
+        let mut server = mockito::Server::new();
+        let _m = server.mock("PATCH", "/services/data/v44.0/sobjects/Account/123")
+            .with_status(204)
+            .with_header("content-type", "application/json")
+            .create();
+
+        let client = create_client(&mut server);
+
+        let mut rt = Runtime::new().unwrap();
+        let req_fut = client
+            .update("Account", "123", [("Name", "foo"), ("Abc__c", "123")]);
+        let r = rt.block_on(req_fut);
+
+        assert_eq!(true, r.is_ok());
+
+        Ok(())
+    }
+
+    #[test]
+    fn upsert_201() -> Result<(), Error> {
+        let mut server = mockito::Server::new();
+        let _m = server.mock(
+            "PATCH",
+            "/services/data/v44.0/sobjects/Account/ExKey__c/123",
+        )
             .with_status(201)
             .with_header("content-type", "application/json")
             .with_body(
@@ -711,64 +775,22 @@ mod tests {
                                 "success": true,
                 //                "errors": vec![],
                             })
-                .to_string(),
+                    .to_string(),
             )
             .create();
 
-        let client = create_test_client();
-        let r = client
-            .create("Account", [("Name", "foo"), ("Abc__c", "123")])
-            .await?;
-        assert_eq!("12345", r.id);
-        assert_eq!(true, r.success);
+        let client = create_client(&mut server);
 
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn update() -> Result<(), Error> {
-        let _m = mock("PATCH", "/services/data/v44.0/sobjects/Account/123")
-            .with_status(204)
-            .with_header("content-type", "application/json")
-            .create();
-
-        let client = create_test_client();
-        let r = client
-            .update("Account", "123", [("Name", "foo"), ("Abc__c", "123")])
-            .await;
-        assert_eq!(true, r.is_ok());
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn upsert_201() -> Result<(), Error> {
-        let _m = mock(
-            "PATCH",
-            "/services/data/v44.0/sobjects/Account/ExKey__c/123",
-        )
-        .with_status(201)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                            "id": "12345",
-                            "success": true,
-            //                "errors": vec![],
-                        })
-            .to_string(),
-        )
-        .create();
-
-        let client = create_test_client();
-        let r = client
+        let mut rt = Runtime::new().unwrap();
+        let req_fut = client
             .upsert(
                 "Account",
                 "ExKey__c",
                 "123",
                 [("Name", "foo"), ("Abc__c", "123")],
-            )
-            .await
-            .unwrap();
+            );
+        let r = rt.block_on(req_fut).unwrap();
+
         assert_eq!(true, r.is_some());
         let res = r.unwrap();
         assert_eq!("12345", res.id);
@@ -777,62 +799,75 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn upsert_204() -> Result<(), Error> {
-        let _m = mock(
+    #[test]
+    fn upsert_204() -> Result<(), Error> {
+        let mut server = mockito::Server::new();
+        let _m = server.mock(
             "PATCH",
             "/services/data/v44.0/sobjects/Account/ExKey__c/123",
         )
-        .with_status(204)
-        .with_header("content-type", "application/json")
-        .create();
+            .with_status(204)
+            .with_header("content-type", "application/json")
+            .create();
 
-        let client = create_test_client();
-        let r = client
+        let client = create_client(&mut server);
+
+
+        let mut rt = Runtime::new().unwrap();
+        let req_fut = client
             .upsert(
                 "Account",
                 "ExKey__c",
                 "123",
                 [("Name", "foo"), ("Abc__c", "123")],
-            )
-            .await
-            .unwrap();
+            );
+        let r = rt.block_on(req_fut).unwrap();
+
         assert_eq!(true, r.is_none());
 
         Ok(())
     }
 
-    #[tokio::test]
-    async fn destroy() -> Result<(), Error> {
-        let _m = mock("DELETE", "/services/data/v44.0/sobjects/Account/123")
+    #[test]
+    fn destroy() -> Result<(), Error> {
+        let mut server = mockito::Server::new();
+        let _m = server.mock("DELETE", "/services/data/v44.0/sobjects/Account/123")
             .with_status(204)
             .with_header("content-type", "application/json")
             .create();
 
-        let client = create_test_client();
-        let r = client.destroy("Account", "123").await?;
-        println!("{:?}", r);
+        let client = create_client(&mut server);
 
+        let mut rt = Runtime::new().unwrap();
+        let req_fut = client.destroy("Account", "123");
+        let r = rt.block_on(req_fut);
+
+        println!("{:?}", r);
         Ok(())
     }
 
-    #[tokio::test]
-    async fn versions() -> Result<(), Error> {
-        let _m = mock("GET", "/services/data/")
+    #[test]
+    fn versions() -> Result<(), Error> {
+        let mut server = mockito::Server::new();
+        let _m = server.mock("GET", "/services/data/")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
                 json!([{
-                    "label": "Winter '19",
-                    "url": "https://ap.salesforce.com/services/data/v44.0/",
-                    "version": "v44.0",
-                }])
-                .to_string(),
+                            "label": "Winter '19",
+                            "url": "https://ap.salesforce.com/services/data/v44.0/",
+                            "version": "v44.0",
+                        }])
+                    .to_string(),
             )
             .create();
 
-        let client = create_test_client();
-        let r = client.versions().await?;
+        let client = create_client(&mut server);
+
+        let mut rt = Runtime::new().unwrap();
+        let req_fut = client.versions();
+        let r = rt.block_on(req_fut).unwrap();
+
         assert_eq!("Winter '19", r[0].label);
         assert_eq!("https://ap.salesforce.com/services/data/v44.0/", r[0].url);
         assert_eq!("v44.0", r[0].version);
@@ -840,32 +875,36 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn find_by_id() -> Result<(), Error> {
-        let _m = mock("GET", "/services/data/v44.0/sobjects/Account/123")
+    #[test]
+    fn find_by_id() -> Result<(), Error> {
+        let mut server = mockito::Server::new();
+        let _m = server.mock("GET", "/services/data/v44.0/sobjects/Account/123")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
                 json!({
-                    "Id": "123",
-                    "Name": "foo",
-                })
-                .to_string(),
+                            "Id": "123",
+                            "Name": "foo",
+                        })
+                    .to_string(),
             )
             .create();
 
-        let client = create_test_client();
-        let r: Account = client.find_by_id("Account", "123").await?;
+        let client = create_client(&mut server);
+
+        let mut rt = Runtime::new().unwrap();
+        let req_fut = client.find_by_id("Account", "123");
+        let r:Account = rt.block_on(req_fut).unwrap();
         assert_eq!("foo", r.name);
 
         Ok(())
     }
 
-    fn create_test_client() -> super::Client {
-        let mut client = super::Client::new_with_client_secret(Some("aaa".to_string()), Some("bbb".to_string()));
-        let url = &mockito::server_url();
-        client.set_instance_url(url);
-        client.set_access_token("this_is_access_token");
-        return client;
+    fn create_client(server: &mut ServerGuard) -> Client {
+        let mut client = super::Client::new();
+        client.set_instance_url(&server.url());
+        client.set_login_endpoint(&server.url());
+        client.set_access_token("token");
+        client
     }
 }

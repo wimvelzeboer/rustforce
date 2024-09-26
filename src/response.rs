@@ -1,6 +1,6 @@
 extern crate reqwest;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize /*, Serialize*/};
 use std::collections::HashMap;
 
 #[derive(Deserialize, Debug)]
