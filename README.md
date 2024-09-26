@@ -32,14 +32,11 @@ struct Attribute {
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    
-    let client_id = env::var("SFDC_CLIENT_ID").unwrap();
-    let client_secret = env::var("SFDC_CLIENT_SECRET").unwrap();
-    let username = env::var("SFDC_USERNAME").unwrap();
-    let password = env::var("SFDC_PASSWORD").unwrap();
 
-    let mut client = Client::new(client_id, client_secret);
-    client.login_with_credential(username, password).await?;
+    let sfdx_auth_url = "force://PlatformCLI::Aep8613Yf9cciJ8KNj51RDvetkI8Fxf78YRstb1GEUj9PFtlw4V42xT4XKJPi3lMMzYdPd3BymGXoLxsiRjyOS_@orgname--sandboxname.sandbox.my.salesforce.com".to_string();
+
+    let mut client = Client::new();
+    client.login_with_sfdx_auth_url(sfdx_auth_url).await?;
 
     let res: QueryResponse<Account> = client.query("SELECT Id, Name FROM Account WHERE id = '0012K00001drfGYQAY'".to_string()).await?;
     println!("{:?}", res);
@@ -52,8 +49,14 @@ async fn main() -> Result<(), Error> {
 
 Username Password Flow
 ```rust
-let mut client = Client::new(client_id, client_secret);
+let mut client = Client::new_with_client_secret(client_id, client_secret);
 client.login_with_credential(username, password).await?;
+```
+
+SFDX Authentication Url
+```rust
+let mut client = Client::new();
+client.login_with_sfdx_auth_url(sfdx_auth_url).await?;
 ```
 
 [WIP]Authorization Code Grant
